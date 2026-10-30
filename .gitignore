@@ -1,0 +1,13 @@
+/node_modules
+/vendor
+/.env
+/storage/*.key
+/public/hot
+/public/storage
+.phpunit.result.cache
+.env.backup
+ca.pem
+/public/build/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+tests/e2e/screenshots/

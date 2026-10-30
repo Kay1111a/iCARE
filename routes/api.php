@@ -1,0 +1,457 @@
+<?php
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\StudentController;
+use App\Http\Controllers\Api\ReferralController;
+use App\Http\Controllers\Api\CaseController;
+use App\Http\Controllers\Api\CaseInterventionController;
+use App\Http\Controllers\Api\SessionNoteController;
+use App\Http\Controllers\Api\AppointmentController;
+use App\Http\Controllers\Api\TestingRecordController;
+use App\Http\Controllers\Api\DocumentController;
+use App\Http\Controllers\Api\NotificationController;
+use App\Http\Controllers\Api\ReportController;
+use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\CaseReferralController;
+use App\Http\Controllers\Api\AuditLogController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\StaffAvailabilityController;
+use App\Http\Controllers\Api\PublicSchedulingController;
+use App\Http\Controllers\Api\StudentAuthController;
+use App\Http\Controllers\Api\CallSlipController;
+use App\Http\Controllers\Api\BackupController;
+use App\Http\Controllers\Api\CronController;
+use App\Http\Controllers\Api\ManagementCollegeController;
+use App\Http\Controllers\Api\ManagementProgramController;
+use App\Http\Controllers\Api\ManagementDepartmentController;
+use App\Http\Controllers\Api\ManagementFormOptionController;
+use App\Http\Controllers\Api\ComplaintController;
+use App\Http\Controllers\Api\IncidentReportController;
+use App\Http\Controllers\Api\FacultyController;
+use App\Http\Controllers\Api\DocumentSettingController;
+use App\Http\Controllers\Api\ManagementAcademicYearController;
+use App\Http\Controllers\Api\ManagementCalendarEntryController;
+
+// Public routes
+Route::post('/login',           [AuthController::class, 'login'])->middleware('throttle:login');
+Route::post('/register',        [AuthController::class, 'register'])->middleware('throttle:login');
+Route::post('/login/verify-otp', [AuthController::class, 'verifyOtp'])->middleware('throttle:login');
+Route::post('/forgot-password', [\App\Http\Controllers\Api\PasswordResetController::class, 'forgot'])->middleware('throttle:login');
+Route::post('/reset-password',  [\App\Http\Controllers\Api\PasswordResetController::class, 'reset'])->middleware('throttle:login');
+Route::get('schedule/{token}', [PublicSchedulingController::class, 'show'])->middleware('throttle:public-form');
+Route::get('schedule/{token}/blocked-dates', [\App\Http\Controllers\Api\CalendarBlockedDatesController::class, 'publicIndex'])->middleware('throttle:public-form');
+Route::post('schedule/{token}/check-availability', [PublicSchedulingController::class, 'checkAvailability'])->middleware('throttle:public-form');
+Route::get('schedule/{token}/month-availability', [PublicSchedulingController::class, 'monthAvailability'])->middleware('throttle:public-form');
+Route::post('schedule/{token}/submit', [PublicSchedulingController::class, 'submit'])->middleware('throttle:public-form');
+
+// External cron endpoints (secured via X-Cron-Secret header, checked inside the controller)
+Route::post('cron/follow-up-reminders', [CronController::class, 'followUpReminders'])->middleware('throttle:public-form');
+Route::post('cron/appointment-reminders', [CronController::class, 'appointmentReminders'])->middleware('throttle:public-form');
+Route::post('cron/detect-no-shows',     [CronController::class, 'detectNoShows'])->middleware('throttle:public-form');
+Route::post('cron/backup',              [CronController::class, 'backup'])->middleware('throttle:public-form');
+Route::post('cron/retry-failed-emails', [CronController::class, 'retryFailedEmails'])->middleware('throttle:public-form');
+
+// Authenticated routes
+Route::middleware(['auth:sanctum', 'actor:staff', 'password.fresh'])->group(function () {
+
+    // Auth
+    Route::post('/logout',     [AuthController::class, 'logout']);
+    Route::get('/me',          [AuthController::class, 'me']);
+    Route::put('/me/password', [AuthController::class, 'changePassword']);
+    Route::put('/me/profile',  [AuthController::class, 'updateProfile']);
+    // B569: "Active Sessions / Linked Devices".
+    Route::get('/me/sessions',                      [AuthController::class, 'sessions']);
+    Route::delete('/me/sessions/{tokenId}',          [AuthController::class, 'revokeSession']);
+    Route::post('/me/sessions/revoke-others',        [AuthController::class, 'revokeOtherSessions']);
+
+    // Dashboard
+    Route::get('/dashboard', [DashboardController::class, 'index']);
+
+    // Students
+    // Looking a student up stays open to every staff role (Refer Student needs
+    // it); changing student records is limited to the roles that own the
+    // Students module, enforced here and not just by the frontend.
+    Route::apiResource('students', StudentController::class)->only(['index', 'show']);
+    Route::get('students/{student}/history', [StudentController::class, 'history']);
+    Route::post('students/check-duplicate-name', [StudentController::class, 'checkDuplicateName']);
+    Route::middleware('role:admin,gcu_staff')->group(function () {
+        Route::apiResource('students', StudentController::class)->only(['store', 'update', 'destroy']);
+        Route::post('students/import', [StudentController::class, 'import']);
+        Route::post('students/{student}/remind-forms', [StudentController::class, 'remindForms']);
+        Route::patch('students/{student}/client-no', [StudentController::class, 'updateClientNo']);
+        // Activating and deactivating a student account is for the GCU Head (admin) only.
+        Route::post('students/{student}/toggle-active', [StudentController::class, 'toggleActive'])->middleware('role:admin');
+        Route::get('students/{student}/status-history', [StudentController::class, 'statusHistory']);
+        Route::post('students/{student}/graduate', [StudentController::class, 'graduate'])->middleware('role:admin');
+        Route::post('students/import-preview', [StudentController::class, 'importPreview']);
+        Route::post('students/import-confirm', [StudentController::class, 'importConfirm']);
+        Route::get('students/{student}/temp-password',  [StudentController::class, 'viewTempPassword']);
+        Route::post('students/{student}/reset-password', [StudentController::class, 'resetPassword']);
+        Route::get('students/{student}/password-info', [StudentController::class, 'passwordInfo']);
+    });
+    Route::get('student/dashboard', [StudentAuthController::class, 'dashboard']);
+    Route::get('student/parent-conference-slips', [StudentAuthController::class, 'parentConferenceSlips']);
+    Route::put('student/profile', [StudentAuthController::class, 'updateProfile']);
+
+
+    // Referrals
+    // Referrals are archived, never deleted.
+    // Sent Referrals / Sent Complaints: what this account itself has sent.
+    Route::get('my/referrals',            [ReferralController::class, 'mine']);
+    Route::put('my/referrals/{id}',       [ReferralController::class, 'updateMine']);
+    Route::get('my/complaints',           [ComplaintController::class, 'mine']);
+    Route::get('my/complaints/{complaint}', [ComplaintController::class, 'showMine']);
+    Route::get('complaints/{complaint}/attachments/{attachment}', [ComplaintController::class, 'attachment']);
+    Route::apiResource('referrals', ReferralController::class)->except(['destroy']);
+    // Deleting a referral isn't part of the plain apiResource set (most
+    // referrals must never be deletable once acted on) - this route exists
+    // only for the one case ReferralController::destroy() allows: the
+    // referrer deleting their own still-unacknowledged referral.
+    Route::delete('referrals/{referral}', [ReferralController::class, 'destroy']);
+    Route::post('referrals/{referral}/acknowledge', [ReferralController::class, 'acknowledge']);
+    // Lets the referrer who submitted an unacknowledged referral fix the
+    // linked student's name/program/year level/sex from Edit Referral -
+    // narrower than (and deliberately separate from) the Students module's
+    // own update route below, which stays role:admin,gcu_staff only.
+    // ReferralController::updateReferredStudent() enforces "referrer, and
+    // only before acknowledgement" itself.
+    Route::put('referrals/{referral}/student', [ReferralController::class, 'updateReferredStudent']);
+    // Re-points the referral at a different, already-existing student (the
+    // referrer picked the wrong one when filing it) - same pre-acknowledgement
+    // window, enforced in ReferralController::reassignStudent() itself.
+    Route::put('referrals/{referral}/reassign-student', [ReferralController::class, 'reassignStudent']);
+    // Request for Cancellation/Void of Referral - the referrer's path once a
+    // referral is acknowledged and destroy() no longer applies. approve
+    // archives it; deny clears the request. Both gated to the unit that owns
+    // the referral via authorizeReferralWriter(), same as archive/unarchive.
+    Route::post('referrals/{referral}/request-void', [ReferralController::class, 'requestVoid']);
+    Route::post('referrals/{referral}/approve-void', [ReferralController::class, 'approveVoid']);
+    Route::post('referrals/{referral}/deny-void',    [ReferralController::class, 'denyVoid']);
+    Route::get('referrals-archived',              [ReferralController::class, 'archived']);
+    Route::post('referrals/{referral}/archive',   [ReferralController::class, 'archive']);
+    Route::post('referrals/{referral}/unarchive', [ReferralController::class, 'unarchive']);
+    Route::post('referrals/{referral}/assign',      [ReferralController::class, 'assign'])->middleware('role:admin'); // reassigning: GCU Head only
+    Route::patch('referrals/{referral}/status',     [ReferralController::class, 'updateStatus']);
+    Route::post('referrals/{referral}/override-status', [ReferralController::class, 'overrideStatus'])->middleware('role:admin,gcu_staff');
+    Route::get('referrals/{referral}/tracking',     [ReferralController::class, 'tracking']);
+    Route::post('referrals/{referral}/feedback',        [ReferralController::class, 'sendFeedback']);
+    Route::post('referrals/{referral}/request-feedback', [ReferralController::class, 'requestFeedback']);
+    Route::get('college-report', [ReportController::class, 'collegeSummary'])->middleware('role:dean,dean_secretary');
+    Route::post('referrals/{referral}/admission-slip',  [ReferralController::class, 'saveAdmissionSlip']);
+    Route::get('referrals/{referral}/session-notes',    [SessionNoteController::class, 'indexByReferral']);
+    Route::post('referrals/{referral}/session-notes',   [SessionNoteController::class, 'storeByReferral'])
+        ->middleware('role:admin,gcu_staff');
+
+    // Complaints (SDU Incident Reports) - separate from Referrals.
+    // Filing is open to anyone who can access "Refer Student" (same as
+    // referrals); reviewing/updating status is SDU Head only, below.
+    Route::post('complaints', [ComplaintController::class, 'store']);
+
+    // Cases
+    // Cases are opened by acknowledging a referral and are closed, not deleted.
+    Route::apiResource('cases', CaseController::class)->except(['store', 'destroy']);
+    Route::patch('cases/{case}/status',        [CaseController::class, 'updateStatus']);
+    Route::post('cases/{case}/close',          [CaseController::class, 'close']);
+    Route::get('cases/{case}/summary',         [CaseController::class, 'summary']);
+    Route::post('cases/{case}/refer-tmdu',     [CaseController::class, 'referToTmdu']);
+    Route::post('cases/{case}/refer-external', [CaseController::class, 'referExternal']);
+    Route::post('cases/{case}/handoff',        [CaseController::class, 'handoff']);
+    Route::post('cases/{case}/handoffs/{handoff}/acknowledge', [CaseController::class, 'acknowledgeHandoff']);
+
+
+    Route::post('cases/{case}/flag-unreachable',            [CaseController::class, 'flagUnreachable']);
+    Route::post('cases/{case}/flag-follow-up',               [CaseController::class, 'flagFollowUp']);
+    Route::post('cases/{case}/resolve-follow-up',             [CaseController::class, 'resolveFollowUp']);
+    Route::post('cases/{case}/parent-conference-slip',        [CaseController::class, 'issueParentConferenceSlip']);
+    Route::post('parent-conference-slips/{slip}/notes',       [CaseController::class, 'saveParentConferenceNotes']);
+    Route::get('staff-roster',                                [UserController::class, 'roster']);
+    Route::post('cases/{case}/interventions',                 [CaseInterventionController::class, 'store']);
+    Route::post('interventions/{intervention}/complete',      [CaseInterventionController::class, 'complete']);
+    Route::delete('interventions/{intervention}',              [CaseInterventionController::class, 'destroy']);
+
+    // Session Notes
+    Route::get('cases/{case}/session-notes',           [SessionNoteController::class, 'index']);
+    Route::post('cases/{case}/session-notes',          [SessionNoteController::class, 'store'])
+        ->middleware('role:admin,gcu_staff');
+    Route::get('session-notes/{sessionNote}',          [SessionNoteController::class, 'show']);
+    Route::put('session-notes/{sessionNote}',          [SessionNoteController::class, 'update'])
+        ->middleware('role:admin,gcu_staff');
+    Route::delete('session-notes/{sessionNote}',       [SessionNoteController::class, 'destroy'])
+        ->middleware('role:admin,gcu_staff');
+
+    // Appointments
+    // Appointments are cancelled, not deleted.
+    // B648 (10/30/2026): GET /appointments/availability has to be declared
+    // BEFORE apiResource() below - Laravel matches GET routes in
+    // declaration order, not by literal-vs-wildcard specificity, so with
+    // apiResource's GET appointments/{appointment} (show) registered
+    // first, a request to .../availability was being swallowed by show()
+    // with "availability" bound as the {appointment} id and always 404ing
+    // ("No query results for model [Appointment] availability") - the
+    // frontend (resources/js/api/index.js) calls this endpoint, so it was
+    // actually broken, not just missing test coverage.
+    Route::get('appointments/availability',              [AppointmentController::class, 'availability']);
+    Route::apiResource('appointments', AppointmentController::class)->except(['destroy']);
+    Route::post('appointments/{appointment}/confirm',    [AppointmentController::class, 'confirm']);
+    Route::post('appointments/{appointment}/reschedule', [AppointmentController::class, 'reschedule']);
+    Route::post('appointments/{appointment}/reschedule-now', [AppointmentController::class, 'rescheduleNow']);
+    Route::post('appointments/{appointment}/cancel',     [AppointmentController::class, 'cancel']);
+    Route::post('appointments/{appointment}/check-in',   [AppointmentController::class, 'checkIn']);
+    Route::post('appointments/{appointment}/escalate-no-show', [AppointmentController::class, 'escalateNoShow']);
+    Route::post('appointments/{appointment}/send-call-slip', [AppointmentController::class, 'sendCallSlipUnscheduled']);
+    Route::post('appointments/{appointment}/override-status', [AppointmentController::class, 'overrideStatus'])->middleware('role:admin,tmdu_head,gcu_staff');
+    // GCU staff/admin: directly schedule a date/time for a student on an
+    // appointment still awaiting the student to pick one (from the Override
+    // Status panel), instead of waiting for them to use their scheduling link.
+    Route::post('appointments/{appointment}/schedule-student', [AppointmentController::class, 'scheduleForStudent'])->middleware('role:admin,gcu_staff');
+    Route::post('appointments/check-conflict',           [AppointmentController::class, 'checkConflict']);
+
+    // Call Slips (Dean's Secretary - escalated no-show follow-up)
+    Route::get('call-slips',                          [CallSlipController::class, 'index']);
+    Route::post('call-slips/{appointment}/contacted', [CallSlipController::class, 'markContacted']);
+    Route::post('call-slips/{appointment}/reschedule', [CallSlipController::class, 'requestReschedule']);
+    Route::post('call-slips/{appointment}/escalate',  [CallSlipController::class, 'escalateToDeptChair']);
+
+    // Staff Availability
+    Route::apiResource('staff-availability', StaffAvailabilityController::class);
+
+    // Testing Records
+    // Registered before the apiResource below so "available-testers" isn't
+    // swallowed by its {testingRecord} show route.
+    // Testing Records, PAR release and the TMDU tester roster belong to TMDU only.
+    Route::middleware('role:tmdu_staff,tmdu_head')->group(function () {
+        Route::get('testing-records/available-testers', [TestingRecordController::class, 'availableTesters']);
+        // Testing records come from a Refer-to-TMDU action and are never deleted.
+        Route::apiResource('testing-records', TestingRecordController::class)->except(['store', 'destroy']);
+        Route::post('testing-records/{testingRecord}/assign',            [TestingRecordController::class, 'assign']);
+        Route::patch('testing-records/{testingRecord}/status',           [TestingRecordController::class, 'updateStatus']);
+        Route::post('testing-records/{testingRecord}/send-to-gcu',       [TestingRecordController::class, 'sendToGcu']);
+        Route::post('testing-records/{testingRecord}/acknowledge',       [TestingRecordController::class, 'acknowledge']);
+        Route::post('testing-records/{testingRecord}/schedule-testing',  [TestingRecordController::class, 'scheduleTesting']);
+        // "Psychological Tests Administered" action on the Testing Record Details
+        // page - saves tests + date and moves status straight to Awaiting Results.
+        Route::post('testing-records/{testingRecord}/administer-tests',  [TestingRecordController::class, 'administerTests']);
+        Route::post('testing-records/{testingRecord}/schedule-par',      [TestingRecordController::class, 'schedulePar']);
+        Route::get('testing-records/{testingRecord}/or-photo',           [TestingRecordController::class, 'orPhoto']);
+        Route::post('appointments/{appointment}/par-action', [TestingRecordController::class, 'parAction']);
+    });
+
+    // Case Referrals (Internal) - GCU's read-only view of the Refer to TMDU
+    // forms it sent, their status and the released PAR.
+    Route::middleware('role:admin,gcu_staff')->group(function () {
+        Route::get('case-referrals',                       [CaseReferralController::class, 'index']);
+        Route::get('case-referrals/by-source/{referral}',  [CaseReferralController::class, 'forSource']);
+        Route::get('case-referrals/{referral}',            [CaseReferralController::class, 'show']);
+    });
+
+    // Documents - staff units only (faculty / dean secretaries have no business here)
+    Route::middleware('role:admin,gcu_staff,sdu_head,tmdu_staff,tmdu_head')->group(function () {
+        Route::post('documents/upload',                [DocumentController::class, 'upload']);
+        Route::get('documents/{document}',             [DocumentController::class, 'show']);
+        Route::delete('documents/{document}',          [DocumentController::class, 'destroy']);
+        Route::get('documents/{document}/download',    [DocumentController::class, 'download']);
+    });
+
+    // Notifications
+    Route::get('notifications',              [NotificationController::class, 'index']);
+    Route::post('notifications/{id}/read',   [NotificationController::class, 'markRead']);
+    Route::post('notifications/read-all',    [NotificationController::class, 'markAllRead']);
+    Route::get('notification-logs',          [NotificationController::class, 'logs']);
+
+    // Reports - one per unit. Everyone, the GCU Head included, is held to
+    // their own unit inside ReportController.
+    Route::prefix('reports')->middleware('role:admin,gcu_staff,tmdu_staff,tmdu_head,sdu_head')->group(function () {
+        Route::get('referrals',    [ReportController::class, 'referrals']);
+        Route::get('appointments', [ReportController::class, 'appointments']);
+        Route::get('cases',        [ReportController::class, 'cases']);
+        Route::get('recurring-concerns', [ReportController::class, 'recurringConcerns']);
+        Route::get('services',     [ReportController::class, 'services']);
+        Route::get('complaints',   [ReportController::class, 'complaints']);
+        Route::get('sdu-referrals', [ReportController::class, 'sduReferrals']);
+        Route::get('gcu-accomplishment', [ReportController::class, 'gcuAccomplishment']);
+        Route::get('dashboard',    [ReportController::class, 'dashboardStats']);
+        Route::get('export/pdf',   [ReportController::class, 'exportPdf']);
+        Route::get('export/excel', [ReportController::class, 'exportExcel']);
+    });
+
+    // Management reference data (Colleges, Programs, Departments, Referral Form Options)
+    // - read access: any authenticated staff, since these are consumed by ordinary forms
+    // - write access: Admin and System Admin (see role groups below)
+    Route::get('management/colleges',     [ManagementCollegeController::class, 'index']);
+    Route::get('management/programs',     [ManagementProgramController::class, 'index']);
+    Route::get('management/departments',  [ManagementDepartmentController::class, 'index']);
+    Route::get('management/form-options', [ManagementFormOptionController::class, 'index']);
+    Route::get('management/academic-years', [ManagementAcademicYearController::class, 'index']);
+    Route::get('management/calendar-entries', [ManagementCalendarEntryController::class, 'index']);
+    Route::get('calendar/blocked-dates', [\App\Http\Controllers\Api\CalendarBlockedDatesController::class, 'index']);
+
+    // Document Settings (Revision No. / Effectivity / Ctrl No. shown on the
+    // referral form header) - read access: any authenticated staff, since
+    // both Refer a Student and the Referral Details page display it.
+    Route::get('document-settings/{code}', [DocumentSettingController::class, 'show']);
+
+       // Faculty module - Dean (college-wide) and Dept Chair (own department).
+    // FacultyController scopes every query/write to the caller's college/department.
+    Route::middleware('role:dean,dean_secretary,dept_chair')->prefix('faculty')->group(function () {
+        Route::get('/',                             [FacultyController::class, 'index']);
+        Route::post('/',                            [FacultyController::class, 'store']);
+        // B638: live Employee ID / name duplicate check for the Add/Edit
+        // Faculty form - a static path, so it's listed ahead of the
+        // '{user}' routes below for clarity even though no clash exists.
+        Route::get('check-duplicate',               [FacultyController::class, 'checkDuplicate']);
+        Route::post('import-preview',               [FacultyController::class, 'importPreview']);
+        Route::post('import-confirm',               [FacultyController::class, 'importConfirm']);
+        Route::put('{user}',                        [FacultyController::class, 'update']);
+        Route::post('{user}/toggle-active',         [FacultyController::class, 'toggle']);
+        Route::post('{user}/reset-password',        [FacultyController::class, 'resetPassword']);
+        Route::get('{user}/password-info',          [FacultyController::class, 'passwordInfo']);
+        Route::get('{user}/temp-password',          [FacultyController::class, 'tempPassword']);
+        Route::post('{user}/assign-chair',          [FacultyController::class, 'assignChair']);
+        Route::post('{user}/remove-chair',          [FacultyController::class, 'removeChair']);
+    });
+
+    // User Management: GCU Head (every account), TMDU Head (TMDU Staff) and
+    // Dean (faculty and chairs of their college). UserController limits who
+    // each of them can see and change.
+    Route::middleware('role:admin,tmdu_head,dean,dean_secretary')->group(function () {
+        Route::apiResource('users', UserController::class);
+        Route::post('users/{user}/toggle-active',  [UserController::class, 'toggleActive']);
+        Route::get('users/{user}/open-work',       [UserController::class, 'openWork']);
+        Route::get('users/{user}/status-history',  [UserController::class, 'statusHistory']);
+        Route::post('users/{user}/reset-password', [UserController::class, 'resetPassword']);
+        Route::get('users/{user}/password-info', [UserController::class, 'passwordInfo']);
+        Route::get('users/{user}/temp-password',   [UserController::class, 'viewTempPassword']);
+    });
+
+    // Masterlist upload: GCU Head (any account), TMDU Head (TMDU Staff only),
+    // and Dean (their own college's faculty/dept chairs only) -
+    // UserController::scopeImportRow keeps each role's rows to that.
+    Route::middleware('role:admin,tmdu_head,dean,dean_secretary')->group(function () {
+        Route::post('users/import-preview', [UserController::class, 'importPreview']);
+        Route::post('users/import-confirm', [UserController::class, 'importConfirm']);
+    });
+
+    // Admin only
+    Route::middleware('role:admin')->group(function () {
+        Route::post('users/import', [UserController::class, 'import']);
+        Route::get('audit-logs',        [AuditLogController::class, 'index']);
+        Route::get('audit-logs/filter-options', [AuditLogController::class, 'filterOptions']);
+        Route::get('audit-logs/summary', [AuditLogController::class, 'summary']);
+        Route::get('audit-logs/export/pdf',   [AuditLogController::class, 'exportPdf']);
+        Route::get('audit-logs/export/excel', [AuditLogController::class, 'exportExcel']);
+        Route::get('audit-logs/{auditLog}', [AuditLogController::class, 'show']);
+
+        // Backup & Recovery
+        Route::get('backups',                [BackupController::class, 'index']);
+        Route::post('backups/run',           [BackupController::class, 'store']);
+        Route::post('backups/restore-data',  [BackupController::class, 'restoreData']);
+        Route::post('backups/restore-config',[BackupController::class, 'restoreConfig']);
+
+    });
+
+    // Admin and System Admin - Management page write access (Colleges,
+    // Programs, Departments, Referral Form Options). System Admin still
+    // cannot touch students, referrals, cases, or User Management - only
+    // Admin has both this and those.
+    Route::middleware('role:admin,system_admin')->group(function () {
+        // Document headers - Revision No. / Effectivity / Ctrl No. The GCU Head edits GCU's,
+        // the System Admin edits TMDU's (checked inside DocumentSettingController).
+        Route::put('document-settings/{code}', [DocumentSettingController::class, 'update']);
+        Route::get('document-settings/{code}/versions', [DocumentSettingController::class, 'versions']);
+        Route::post('document-settings/{code}/versions/{version}/activate', [DocumentSettingController::class, 'activate']);
+        Route::post('document-settings/{code}/versions/{version}/archive', [DocumentSettingController::class, 'archive']);
+        Route::delete('document-settings/{code}/versions/{version}', [DocumentSettingController::class, 'destroy']);
+
+        Route::post('management/{kind}/{id}/status', [\App\Http\Controllers\Api\ManagementStatusController::class, 'update'])
+            ->whereIn('kind', ['colleges', 'programs', 'departments', 'form-options', 'academic-years'])->whereNumber('id');
+        Route::get('management/{kind}/{id}/last-status-change', [\App\Http\Controllers\Api\ManagementStatusController::class, 'lastChange'])
+            ->whereIn('kind', ['colleges', 'programs', 'departments', 'form-options', 'academic-years'])->whereNumber('id');
+        Route::post('management/colleges',             [ManagementCollegeController::class, 'store']);
+        Route::put('management/colleges/{college}',     [ManagementCollegeController::class, 'update']);
+        Route::delete('management/colleges/{college}',  [ManagementCollegeController::class, 'destroy']);
+        Route::get('management/colleges/{college}/usage', [ManagementCollegeController::class, 'usage']);
+
+        Route::post('management/programs',              [ManagementProgramController::class, 'store']);
+        Route::put('management/programs/{program}',      [ManagementProgramController::class, 'update']);
+        Route::delete('management/programs/{program}',   [ManagementProgramController::class, 'destroy']);
+        Route::get('management/programs/{program}/usage', [ManagementProgramController::class, 'usage']);
+
+        Route::post('management/departments',               [ManagementDepartmentController::class, 'store']);
+        Route::put('management/departments/{department}',    [ManagementDepartmentController::class, 'update']);
+        Route::delete('management/departments/{department}', [ManagementDepartmentController::class, 'destroy']);
+        Route::get('management/departments/{department}/usage', [ManagementDepartmentController::class, 'usage']);
+
+        Route::post('management/academic-years',                 [ManagementAcademicYearController::class, 'store']);
+        Route::put('management/academic-years/{academicYear}',    [ManagementAcademicYearController::class, 'update']);
+        Route::delete('management/academic-years/{academicYear}', [ManagementAcademicYearController::class, 'destroy']);
+        Route::get('management/academic-years/{academicYear}/usage', [ManagementAcademicYearController::class, 'usage']);
+        Route::post('management/academic-years/{academicYear}/current', [ManagementAcademicYearController::class, 'setCurrent']);
+
+        Route::post('management/calendar-entries',                         [ManagementCalendarEntryController::class, 'store']);
+        Route::put('management/calendar-entries/{entry}',                  [ManagementCalendarEntryController::class, 'update']);
+        Route::post('management/calendar-entries/{entry}/archive',         [ManagementCalendarEntryController::class, 'archive']);
+        Route::post('management/calendar-entries/{entry}/reactivate',      [ManagementCalendarEntryController::class, 'reactivate']);
+        Route::delete('management/calendar-entries/{entry}',               [ManagementCalendarEntryController::class, 'destroy']);
+
+        Route::post('management/form-options',                  [ManagementFormOptionController::class, 'store']);
+        Route::put('management/form-options/{formOption}',       [ManagementFormOptionController::class, 'update']);
+        Route::delete('management/form-options/{formOption}',    [ManagementFormOptionController::class, 'destroy']);
+        Route::get('management/form-options/{formOption}/usage', [ManagementFormOptionController::class, 'usage']);
+    });
+
+    // SDU Head only - reviewing/actioning filed complaints
+    Route::middleware('role:sdu_head')->group(function () {
+        Route::get('complaints',                      [ComplaintController::class, 'index']);
+        Route::get('complaints/{complaint}',          [ComplaintController::class, 'show']);
+        Route::patch('complaints/{complaint}/status', [ComplaintController::class, 'updateStatus']);
+
+        // Student Incident Reports: one per student, holding their complaints,
+        // the IR status and SDU's handoffs to GCU.
+        Route::get('incident-reports',                    [IncidentReportController::class, 'index']);
+        Route::get('incident-reports/{student}',          [IncidentReportController::class, 'show']);
+        Route::patch('incident-reports/{student}/status', [IncidentReportController::class, 'updateStatus']);
+    });
+});
+
+// Student authentication routes (completely separate from staff auth:sanctum group)
+Route::post('student/login', [StudentAuthController::class, 'login'])->middleware('throttle:login');
+Route::post('student/register', [StudentAuthController::class, 'register'])->middleware('throttle:login');
+
+Route::middleware(['auth:student', 'actor:student', 'password.fresh'])->group(function () {
+    Route::get('student/referrals/{id}', [StudentAuthController::class, 'showReferral']);
+    Route::post('student/referrals',     [StudentAuthController::class, 'referSelf']);
+    // Referring / filing against another student, and what this student has sent.
+    Route::middleware('throttle:30,1')->post('student/outreach/lookup', [\App\Http\Controllers\Api\StudentOutreachController::class, 'lookup']);
+    Route::get('student/outreach/options',      [\App\Http\Controllers\Api\StudentOutreachController::class, 'formOptions']);
+    Route::post('student/outreach/referrals',   [\App\Http\Controllers\Api\StudentOutreachController::class, 'refer']);
+    Route::get('student/outreach/referrals',    [\App\Http\Controllers\Api\StudentOutreachController::class, 'sentReferrals']);
+    Route::put('student/outreach/referrals/{id}', [\App\Http\Controllers\Api\StudentOutreachController::class, 'updateSent']);
+    Route::post('student/outreach/complaints',  [ComplaintController::class, 'storeByStudent']);
+    Route::get('student/outreach/complaints',   [ComplaintController::class, 'mineByStudent']);
+    Route::get('student/outreach/complaints/{complaint}', [ComplaintController::class, 'showMineByStudent']);
+    Route::get('student/appointments/{id}', [StudentAuthController::class, 'showAppointment']);
+    Route::get('student/appointments',                 [AppointmentController::class, 'indexByStudent']);
+    Route::get('student/calendar/blocked-dates',       [\App\Http\Controllers\Api\CalendarBlockedDatesController::class, 'index']);
+    Route::post('student/appointments',                [AppointmentController::class, 'storeByStudent']);
+    Route::post('student/appointments/check-conflict', [AppointmentController::class, 'checkConflictByStudent']);
+    Route::post('student/appointments/{appointment}/request-reschedule', [AppointmentController::class, 'requestRescheduleByStudent']);
+    Route::post('student/logout', [StudentAuthController::class, 'logout']);
+    Route::get('student/me', [StudentAuthController::class, 'me']);
+    // B569: "Active Sessions / Linked Devices".
+    Route::get('student/sessions',                     [StudentAuthController::class, 'sessions']);
+    Route::delete('student/sessions/{tokenId}',         [StudentAuthController::class, 'revokeSession']);
+    Route::post('student/sessions/revoke-others',       [StudentAuthController::class, 'revokeOtherSessions']);
+    Route::get('student/dashboard', [StudentAuthController::class, 'dashboard']);
+    Route::put('student/password', [StudentAuthController::class, 'changePassword']);
+    Route::put('student/profile', [StudentAuthController::class, 'updateProfile']);
+    Route::get('student/notifications', [NotificationController::class, 'index']);
+    Route::post('student/notifications/{id}/read', [NotificationController::class, 'markRead']);
+    Route::post('student/notifications/read-all', [NotificationController::class, 'markAllRead']);
+
+    // Testing (TMDU) - student side
+    Route::get('student/testing-records',      [StudentAuthController::class, 'testingRecords']);
+    Route::get('student/testing-records/{id}', [StudentAuthController::class, 'showTestingRecord']);
+    Route::get('student/testing-records/{id}/par', [StudentAuthController::class, 'downloadPar']);
+    Route::post('student/testing-records/{testingRecord}/request-testing', [TestingRecordController::class, 'requestTestingByStudent']);
+});
